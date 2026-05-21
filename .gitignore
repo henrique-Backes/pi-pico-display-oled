@@ -1,0 +1,21 @@
+# Build
+build/
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Agent files
+AGENTS.md
+GEMINI.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+nul

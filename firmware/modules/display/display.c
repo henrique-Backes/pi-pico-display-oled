@@ -1,0 +1,719 @@
+/** @file display.c
+ *
+ * @brief Driver para o display OLED SSD1306 via I2C.
+ *
+ * @par
+ * Implementacao do controle de hardware I2C e renderizacao
+ * de dados no display OLED 128x64 (SSD1306).
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include "display.h"
+#include "hardware/i2c.h"
+#include "hardware/gpio.h"
+#include "pico/stdlib.h"
+
+/* ------------------------------------------------------------------ */
+/*  Definicoes de Hardware                                             */
+/* ------------------------------------------------------------------ */
+
+#define DISPLAY_I2C_PORT      i2c0
+#define DISPLAY_I2C_SDA       16u
+#define DISPLAY_I2C_SCL       17u
+#define DISPLAY_I2C_CLK_HZ   400000u
+
+#define SSD1306_ADDR          0x3Cu
+#define SSD1306_WIDTH         128u
+#define SSD1306_HEIGHT        64u
+#define SSD1306_PAGES        8u
+
+/* ------------------------------------------------------------------ */
+/*  Comandos SSD1306                                                   */
+/* ------------------------------------------------------------------ */
+
+#define SSD1306_CMD_DISPLAY_OFF          0xAEu
+#define SSD1306_CMD_DISPLAY_ON           0xAFu
+#define SSD1306_CMD_SET_DISP_CLK_DIV     0xD5u
+#define SSD1306_CMD_SET_MUX_RATIO        0xA8u
+#define SSD1306_CMD_SET_DISP_OFFSET      0xD3u
+#define SSD1306_CMD_SET_DISP_START_LINE  0x40u
+#define SSD1306_CMD_SET_CHARGE_PUMP      0x8Du
+#define SSD1306_CMD_SET_SEG_REMAP        0xA1u
+#define SSD1306_CMD_SET_COM_SCAN_DIR     0xC8u
+#define SSD1306_CMD_SET_COM_PINS         0xDAu
+#define SSD1306_CMD_SET_CONTRAST         0x81u
+#define SSD1306_CMD_SET_PRECHARGE        0xD9u
+#define SSD1306_CMD_SET_VCOM_DESELECT    0xDBu
+#define SSD1306_CMD_SET_ENTIRE_ON_RESUME 0xA4u
+#define SSD1306_CMD_SET_NORMAL_DISP      0xA6u
+#define SSD1306_CMD_SET_MEM_ADDR_MODE    0x20u
+#define SSD1306_CMD_SET_COL_ADDR         0x21u
+#define SSD1306_CMD_SET_PAGE_ADDR        0x22u
+
+/* ------------------------------------------------------------------ */
+/* Fonte 7x10 — 96 caracteres ASCII 32-127, 7 bytes por caractere     */
+/* Cada caractere: 7 colunas x 10 linhas (2 paginas, padding 6px)     */
+/* ------------------------------------------------------------------ */
+
+static const uint8_t g_font7x10[][7] = {
+{0x00u,0x00u,0x00u,0x00u,0x00u,0x00u,0x00u}, /*   */
+{0x00u,0x00u,0x04u,0xFCu,0x00u,0x00u,0x00u}, /* ! */
+{0x00u,0x00u,0x0Cu,0x04u,0x0Cu,0x00u,0x00u}, /* " */
+{0x14u,0x7Cu,0x14u,0x7Cu,0x14u,0x00u,0x00u}, /* # */
+{0x44u,0x54u,0xFEu,0x54u,0x88u,0x00u,0x00u}, /* $ */
+{0x64u,0x34u,0x08u,0x34u,0x64u,0x00u,0x00u}, /* % */
+{0x00u,0x48u,0x54u,0x24u,0x50u,0x00u,0x00u}, /* & */
+{0x00u,0x04u,0x0Cu,0x00u,0x00u,0x00u,0x00u}, /* ' */
+{0x00u,0x38u,0x44u,0x82u,0x00u,0x00u,0x00u}, /* ( */
+{0x00u,0x82u,0x44u,0x38u,0x00u,0x00u,0x00u}, /* ) */
+{0x28u,0x10u,0x7Cu,0x10u,0x28u,0x00u,0x00u}, /* * */
+{0x10u,0x10u,0x7Cu,0x10u,0x10u,0x00u,0x00u}, /* + */
+{0x00u,0x80u,0x60u,0x00u,0x00u,0x00u,0x00u}, /* , */
+{0x10u,0x10u,0x10u,0x10u,0x10u,0x00u,0x00u}, /* - */
+{0x00u,0xC0u,0xC0u,0x00u,0x00u,0x00u,0x00u}, /* . */
+{0x40u,0x20u,0x10u,0x08u,0x04u,0x00u,0x00u}, /* / */
+{0x7Cu,0xA2u,0x92u,0x8Au,0x7Cu,0x00u,0x00u}, /* 0 */
+{0x00u,0x84u,0xFEu,0x80u,0x00u,0x00u,0x00u}, /* 1 */
+{0x84u,0xC2u,0xA2u,0x92u,0x8Cu,0x00u,0x00u}, /* 2 */
+{0x44u,0x82u,0x92u,0x92u,0x6Cu,0x00u,0x00u}, /* 3 */
+{0x18u,0x14u,0x12u,0xFEu,0x10u,0x00u,0x00u}, /* 4 */
+{0xE4u,0xA4u,0xA4u,0xA4u,0x9Cu,0x00u,0x00u}, /* 5 */
+{0x7Cu,0x92u,0x92u,0x92u,0x64u,0x00u,0x00u}, /* 6 */
+{0x02u,0xC2u,0x12u,0x0Au,0x06u,0x00u,0x00u}, /* 7 */
+{0x6Cu,0x92u,0x92u,0x92u,0x6Cu,0x00u,0x00u}, /* 8 */
+{0x0Cu,0x92u,0x92u,0x52u,0x3Cu,0x00u,0x00u}, /* 9 */
+{0x00u,0x6Cu,0x6Cu,0x00u,0x00u,0x00u,0x00u}, /* : */
+{0x00u,0x6Cu,0xACu,0x00u,0x00u,0x00u,0x00u}, /* ; */
+{0x10u,0x28u,0x44u,0x82u,0x00u,0x00u,0x00u}, /* < */
+{0x28u,0x28u,0x28u,0x28u,0x28u,0x00u,0x00u}, /* = */
+{0x00u,0x82u,0x44u,0x28u,0x10u,0x00u,0x00u}, /* > */
+{0x04u,0x02u,0xA2u,0x12u,0x0Cu,0x00u,0x00u}, /* ? */
+{0x64u,0x92u,0xF2u,0x82u,0x7Cu,0x00u,0x00u}, /* @ */
+{0xFCu,0x22u,0x22u,0x22u,0xFCu,0x00u,0x00u}, /* A */
+{0xFEu,0x92u,0x92u,0x92u,0x6Cu,0x00u,0x00u}, /* B */
+{0x7Cu,0x82u,0x82u,0x82u,0x44u,0x00u,0x00u}, /* C */
+{0xFEu,0x82u,0x82u,0x44u,0x38u,0x00u,0x00u}, /* D */
+{0xFEu,0x92u,0x92u,0x92u,0x82u,0x00u,0x00u}, /* E */
+{0xFEu,0x12u,0x12u,0x12u,0x02u,0x00u,0x00u}, /* F */
+{0x7Cu,0x82u,0x92u,0x92u,0x5Cu,0x00u,0x00u}, /* G */
+{0xFEu,0x10u,0x10u,0x10u,0xFEu,0x00u,0x00u}, /* H */
+{0x00u,0x82u,0xFEu,0x82u,0x00u,0x00u,0x00u}, /* I */
+{0x40u,0x80u,0x82u,0x7Eu,0x02u,0x00u,0x00u}, /* J */
+{0xFEu,0x10u,0x28u,0x44u,0x82u,0x00u,0x00u}, /* K */
+{0xFEu,0x80u,0x80u,0x80u,0x80u,0x00u,0x00u}, /* L */
+{0xFEu,0x04u,0x08u,0x04u,0xFEu,0x00u,0x00u}, /* M */
+{0xFEu,0x08u,0x10u,0x20u,0xFEu,0x00u,0x00u}, /* N */
+{0x7Cu,0x82u,0x82u,0x82u,0x7Cu,0x00u,0x00u}, /* O */
+{0xFEu,0x12u,0x12u,0x12u,0x0Cu,0x00u,0x00u}, /* P */
+{0x7Cu,0x82u,0xA2u,0x42u,0xBCu,0x00u,0x00u}, /* Q */
+{0xFEu,0x12u,0x32u,0x52u,0x8Cu,0x00u,0x00u}, /* R */
+{0x4Cu,0x92u,0x92u,0x92u,0x64u,0x00u,0x00u}, /* S */
+{0x02u,0x02u,0xFEu,0x02u,0x02u,0x00u,0x00u}, /* T */
+{0x7Eu,0x80u,0x80u,0x80u,0x7Eu,0x00u,0x00u}, /* U */
+{0x3Eu,0x40u,0x80u,0x40u,0x3Eu,0x00u,0x00u}, /* V */
+{0xFEu,0x40u,0x30u,0x40u,0xFEu,0x00u,0x00u}, /* W */
+{0xC6u,0x28u,0x10u,0x28u,0xC6u,0x00u,0x00u}, /* X */
+{0x06u,0x08u,0xF0u,0x08u,0x06u,0x00u,0x00u}, /* Y */
+{0xC2u,0xA2u,0x92u,0x8Au,0x86u,0x00u,0x00u}, /* Z */
+{0x00u,0x00u,0xFEu,0x82u,0x82u,0x00u,0x00u}, /* [ */
+{0x04u,0x08u,0x10u,0x20u,0x40u,0x00u,0x00u}, /* \ */
+{0x82u,0x82u,0xFEu,0x00u,0x00u,0x00u,0x00u}, /* ] */
+{0x08u,0x04u,0x02u,0x04u,0x08u,0x00u,0x00u}, /* ^ */
+{0x80u,0x80u,0x80u,0x80u,0x80u,0x00u,0x00u}, /* _ */
+{0x00u,0x02u,0x04u,0x08u,0x00u,0x00u,0x00u}, /* ` */
+{0x40u,0xA8u,0xA8u,0xA8u,0xF0u,0x00u,0x00u}, /* a */
+{0xFEu,0x90u,0x88u,0x88u,0x70u,0x00u,0x00u}, /* b */
+{0x70u,0x88u,0x88u,0x88u,0x40u,0x00u,0x00u}, /* c */
+{0x70u,0x88u,0x88u,0x90u,0xFEu,0x00u,0x00u}, /* d */
+{0x70u,0xA8u,0xA8u,0xA8u,0x30u,0x00u,0x00u}, /* e */
+{0x10u,0xFCu,0x12u,0x02u,0x04u,0x00u,0x00u}, /* f */
+{0x18u,0x24u,0xA4u,0xA4u,0x78u,0x00u,0x00u}, /* g */
+{0xFEu,0x10u,0x08u,0x08u,0xF0u,0x00u,0x00u}, /* h */
+{0x00u,0x88u,0xF8u,0x80u,0x00u,0x00u,0x00u}, /* i */
+{0x20u,0x40u,0x88u,0x78u,0x00u,0x00u,0x00u}, /* j */
+{0x00u,0xF8u,0x20u,0x50u,0x88u,0x00u,0x00u}, /* k */
+{0x00u,0x82u,0xFEu,0x80u,0x00u,0x00u,0x00u}, /* l */
+{0xF8u,0x08u,0x30u,0x08u,0xF0u,0x00u,0x00u}, /* m */
+{0xF8u,0x10u,0x08u,0x08u,0xF0u,0x00u,0x00u}, /* n */
+{0x70u,0x88u,0x88u,0x88u,0x70u,0x00u,0x00u}, /* o */
+{0xF8u,0x28u,0x28u,0x28u,0x10u,0x00u,0x00u}, /* p */
+{0x10u,0x28u,0x28u,0x30u,0xF8u,0x00u,0x00u}, /* q */
+{0xF8u,0x10u,0x08u,0x08u,0x10u,0x00u,0x00u}, /* r */
+{0x88u,0xA8u,0xA8u,0xA8u,0x50u,0x00u,0x00u}, /* s */
+{0x08u,0x7Cu,0x88u,0x80u,0x40u,0x00u,0x00u}, /* t */
+{0x78u,0x80u,0x80u,0x40u,0xF8u,0x00u,0x00u}, /* u */
+{0x38u,0x40u,0x80u,0x40u,0x38u,0x00u,0x00u}, /* v */
+{0x78u,0x80u,0x60u,0x80u,0x78u,0x00u,0x00u}, /* w */
+{0x88u,0x50u,0x20u,0x50u,0x88u,0x00u,0x00u}, /* x */
+{0x18u,0xA0u,0xA0u,0xA0u,0x78u,0x00u,0x00u}, /* y */
+{0x88u,0xC8u,0xA8u,0x98u,0x88u,0x00u,0x00u}, /* z */
+{0x00u,0x10u,0x6Cu,0x82u,0x00u,0x00u,0x00u}, /* { */
+{0x00u,0x00u,0xFEu,0x00u,0x00u,0x00u,0x00u}, /* | */
+{0x00u,0x82u,0x6Cu,0x10u,0x00u,0x00u,0x00u}, /* } */
+{0x10u,0x10u,0x54u,0x38u,0x10u,0x00u,0x00u}, /* ~ */
+};
+
+/* ------------------------------------------------------------------ */
+/* Fonte 5x7 (ASCII 32-127) — usada para expansao 2x no titulo        */
+/* ------------------------------------------------------------------ */
+
+static const uint8_t g_font5x7[][5] = {
+{0x00u,0x00u,0x00u,0x00u,0x00u}, /*   */
+{0x00u,0x00u,0x5Fu,0x00u,0x00u}, /* ! */
+{0x00u,0x07u,0x00u,0x07u,0x00u}, /* " */
+{0x14u,0x7Fu,0x14u,0x7Fu,0x14u}, /* # */
+{0x24u,0x2Au,0x7Fu,0x2Au,0x12u}, /* $ */
+{0x23u,0x13u,0x08u,0x64u,0x62u}, /* % */
+{0x36u,0x49u,0x55u,0x22u,0x50u}, /* & */
+{0x00u,0x05u,0x03u,0x00u,0x00u}, /* ' */
+{0x00u,0x1Cu,0x22u,0x41u,0x00u}, /* ( */
+{0x00u,0x41u,0x22u,0x1Cu,0x00u}, /* ) */
+{0x08u,0x2Au,0x1Cu,0x2Au,0x08u}, /* * */
+{0x08u,0x08u,0x3Eu,0x08u,0x08u}, /* + */
+{0x00u,0x50u,0x30u,0x00u,0x00u}, /* , */
+{0x08u,0x08u,0x08u,0x08u,0x08u}, /* - */
+{0x00u,0x60u,0x60u,0x00u,0x00u}, /* . */
+{0x20u,0x10u,0x08u,0x04u,0x02u}, /* / */
+{0x3Eu,0x51u,0x49u,0x45u,0x3Eu}, /* 0 */
+{0x00u,0x42u,0x7Fu,0x40u,0x00u}, /* 1 */
+{0x42u,0x61u,0x51u,0x49u,0x46u}, /* 2 */
+{0x21u,0x41u,0x45u,0x4Bu,0x31u}, /* 3 */
+{0x18u,0x14u,0x12u,0x7Fu,0x10u}, /* 4 */
+{0x27u,0x45u,0x45u,0x45u,0x39u}, /* 5 */
+{0x3Cu,0x4Au,0x49u,0x49u,0x30u}, /* 6 */
+{0x01u,0x71u,0x09u,0x05u,0x03u}, /* 7 */
+{0x36u,0x49u,0x49u,0x49u,0x36u}, /* 8 */
+{0x06u,0x49u,0x49u,0x29u,0x1Eu}, /* 9 */
+{0x00u,0x36u,0x36u,0x00u,0x00u}, /* : */
+{0x00u,0x56u,0x36u,0x00u,0x00u}, /* ; */
+{0x00u,0x08u,0x14u,0x22u,0x41u}, /* < */
+{0x14u,0x14u,0x14u,0x14u,0x14u}, /* = */
+{0x41u,0x22u,0x14u,0x08u,0x00u}, /* > */
+{0x02u,0x01u,0x51u,0x09u,0x06u}, /* ? */
+{0x32u,0x49u,0x79u,0x41u,0x3Eu}, /* @ */
+{0x7Eu,0x11u,0x11u,0x11u,0x7Eu}, /* A */
+{0x7Fu,0x49u,0x49u,0x49u,0x36u}, /* B */
+{0x3Eu,0x41u,0x41u,0x41u,0x22u}, /* C */
+{0x7Fu,0x41u,0x41u,0x22u,0x1Cu}, /* D */
+{0x7Fu,0x49u,0x49u,0x49u,0x41u}, /* E */
+{0x7Fu,0x09u,0x09u,0x01u,0x01u}, /* F */
+{0x3Eu,0x41u,0x41u,0x51u,0x32u}, /* G */
+{0x7Fu,0x08u,0x08u,0x08u,0x7Fu}, /* H */
+{0x00u,0x41u,0x7Fu,0x41u,0x00u}, /* I */
+{0x20u,0x40u,0x41u,0x3Fu,0x01u}, /* J */
+{0x7Fu,0x08u,0x14u,0x22u,0x41u}, /* K */
+{0x7Fu,0x40u,0x40u,0x40u,0x40u}, /* L */
+{0x7Fu,0x02u,0x04u,0x02u,0x7Fu}, /* M */
+{0x7Fu,0x04u,0x08u,0x10u,0x7Fu}, /* N */
+{0x3Eu,0x41u,0x41u,0x41u,0x3Eu}, /* O */
+{0x7Fu,0x09u,0x09u,0x09u,0x06u}, /* P */
+{0x3Eu,0x41u,0x51u,0x21u,0x5Eu}, /* Q */
+{0x7Fu,0x09u,0x19u,0x29u,0x46u}, /* R */
+{0x46u,0x49u,0x49u,0x49u,0x31u}, /* S */
+{0x01u,0x01u,0x7Fu,0x01u,0x01u}, /* T */
+{0x3Fu,0x40u,0x40u,0x40u,0x3Fu}, /* U */
+{0x1Fu,0x20u,0x40u,0x20u,0x1Fu}, /* V */
+{0x7Fu,0x20u,0x18u,0x20u,0x7Fu}, /* W */
+{0x63u,0x14u,0x08u,0x14u,0x63u}, /* X */
+{0x03u,0x04u,0x78u,0x04u,0x03u}, /* Y */
+{0x61u,0x51u,0x49u,0x45u,0x43u}, /* Z */
+{0x00u,0x00u,0x7Fu,0x41u,0x41u}, /* [ */
+{0x02u,0x04u,0x08u,0x10u,0x20u}, /* \ */
+{0x41u,0x41u,0x7Fu,0x00u,0x00u}, /* ] */
+{0x04u,0x02u,0x01u,0x02u,0x04u}, /* ^ */
+{0x40u,0x40u,0x40u,0x40u,0x40u}, /* _ */
+{0x00u,0x01u,0x02u,0x04u,0x00u}, /* ` */
+{0x20u,0x54u,0x54u,0x54u,0x78u}, /* a */
+{0x7Fu,0x48u,0x44u,0x44u,0x38u}, /* b */
+{0x38u,0x44u,0x44u,0x44u,0x20u}, /* c */
+{0x38u,0x44u,0x44u,0x48u,0x7Fu}, /* d */
+{0x38u,0x54u,0x54u,0x54u,0x18u}, /* e */
+{0x08u,0x7Eu,0x09u,0x01u,0x02u}, /* f */
+{0x08u,0x14u,0x54u,0x54u,0x3Cu}, /* g */
+{0x7Fu,0x08u,0x04u,0x04u,0x78u}, /* h */
+{0x00u,0x44u,0x7Du,0x40u,0x00u}, /* i */
+{0x20u,0x40u,0x44u,0x3Du,0x00u}, /* j */
+{0x00u,0x7Fu,0x10u,0x28u,0x44u}, /* k */
+{0x00u,0x41u,0x7Fu,0x40u,0x00u}, /* l */
+{0x7Cu,0x04u,0x18u,0x04u,0x78u}, /* m */
+{0x7Cu,0x08u,0x04u,0x04u,0x78u}, /* n */
+{0x38u,0x44u,0x44u,0x44u,0x38u}, /* o */
+{0x7Cu,0x14u,0x14u,0x14u,0x08u}, /* p */
+{0x08u,0x14u,0x14u,0x18u,0x7Cu}, /* q */
+{0x7Cu,0x08u,0x04u,0x04u,0x08u}, /* r */
+{0x48u,0x54u,0x54u,0x54u,0x20u}, /* s */
+{0x04u,0x3Fu,0x44u,0x40u,0x20u}, /* t */
+{0x3Cu,0x40u,0x40u,0x20u,0x7Cu}, /* u */
+{0x1Cu,0x20u,0x40u,0x20u,0x1Cu}, /* v */
+{0x3Cu,0x40u,0x30u,0x40u,0x3Cu}, /* w */
+{0x44u,0x28u,0x10u,0x28u,0x44u}, /* x */
+{0x0Cu,0x50u,0x50u,0x50u,0x3Cu}, /* y */
+{0x44u,0x64u,0x54u,0x4Cu,0x44u}, /* z */
+{0x00u,0x08u,0x36u,0x41u,0x00u}, /* { */
+{0x00u,0x00u,0x7Fu,0x00u,0x00u}, /* | */
+{0x00u,0x41u,0x36u,0x08u,0x00u}, /* } */
+{0x08u,0x08u,0x2Au,0x1Cu,0x08u}, /* ~ */
+};
+
+/* ------------------------------------------------------------------ */
+/* Constantes Internas */
+/* ------------------------------------------------------------------ */
+
+#define DISPLAY_I2C_CHUNK_SIZE  16u
+#define DISPLAY_CHAR_WIDTH      7u
+#define DISPLAY_CHAR_STEP       8u
+#define DISPLAY_CHAR_BYTE_H     10u
+#define DISPLAY_LINE_H          14u
+#define DISPLAY_DATA_START_Y 18u
+
+#define DISPLAY_BIG_CHAR_W 10u
+#define DISPLAY_BIG_STEP 12u
+#define DISPLAY_BIG_BYTE_H 18u
+
+/* ------------------------------------------------------------------ */
+/* Variaveis Globais de Arquivo */
+/* ------------------------------------------------------------------ */
+
+static uint8_t g_frame_buf[SSD1306_WIDTH * SSD1306_PAGES];
+static uint8_t g_cursor_x;
+static uint8_t g_cursor_y;
+
+/* ------------------------------------------------------------------ */
+/*  Prototipos de Funcoes Privadas                                     */
+/* ------------------------------------------------------------------ */
+
+static void display_write_cmd(uint8_t cmd);
+static void display_write_data(const uint8_t *p_data, uint16_t len);
+static void display_render(void);
+static void display_draw_char(char ch);
+static void display_draw_string(const char *p_str);
+static void display_draw_char_big(char ch);
+static void display_draw_string_big(const char *p_str);
+static void display_set_cursor(uint8_t x_pos, uint8_t y_pos);
+
+/* ------------------------------------------------------------------ */
+/*  Funcoes Privadas                                                   */
+/* ------------------------------------------------------------------ */
+
+/*!
+ * @brief Envia um byte de comando ao SSD1306 via I2C.
+ *
+ * @param[in] cmd Comando de 8 bits para o controlador.
+ */
+static void
+display_write_cmd(uint8_t cmd)
+{
+    uint8_t buf[2u];
+
+    buf[0u] = 0x00u;
+    buf[1u] = cmd;
+    i2c_write_blocking(DISPLAY_I2C_PORT, SSD1306_ADDR,
+                        buf, 2u, false);
+}
+
+/*!
+ * @brief Envia um buffer de dados ao SSD1306 via I2C em chunks.
+ *
+ * Fragmenta o envio em blocos de DISPLAY_I2C_CHUNK_SIZE para
+ * evitar timeout do controlador I2C do RP2040.
+ *
+ * @param[in] p_data Ponteiro para o buffer de dados.
+ * @param[in] len    Quantidade de bytes a enviar.
+ */
+static void
+display_write_data(const uint8_t *p_data, uint16_t len)
+{
+uint8_t buf[DISPLAY_I2C_CHUNK_SIZE + 1u];
+uint16_t offset;
+uint16_t remaining;
+uint16_t chunk;
+
+if (NULL == p_data)
+{
+    return;
+}
+
+if (0u == len)
+{
+    return;
+}
+
+offset = 0u;
+remaining = len;
+
+while (remaining > 0u)
+{
+    if (remaining > DISPLAY_I2C_CHUNK_SIZE)
+    {
+        chunk = DISPLAY_I2C_CHUNK_SIZE;
+    }
+    else
+    {
+        chunk = remaining;
+    }
+
+    buf[0u] = 0x40u;
+    memcpy(&buf[1u], &p_data[offset], chunk);
+    i2c_write_blocking(DISPLAY_I2C_PORT, SSD1306_ADDR,
+        buf, (uint16_t)(chunk + 1u), false);
+
+    offset += chunk;
+    remaining -= chunk;
+}
+}
+
+/*!
+ * @brief Atualiza o display com o conteudo do frame buffer.
+ */
+static void
+display_render(void)
+{
+    display_write_cmd(SSD1306_CMD_SET_COL_ADDR);
+    display_write_cmd(0u);
+    display_write_cmd(SSD1306_WIDTH - 1u);
+
+    display_write_cmd(SSD1306_CMD_SET_PAGE_ADDR);
+    display_write_cmd(0u);
+    display_write_cmd(SSD1306_PAGES - 1u);
+
+    display_write_data(g_frame_buf,
+                       SSD1306_WIDTH * SSD1306_PAGES);
+}
+
+/*!
+ * @brief Desenha um unico caractere 7x10 no frame buffer.
+ *
+ * Cada caractere ocupa 2 paginas (16 pixels verticais): a pagina
+ * superior recebe os bits 0-7 do glyph, a pagina inferior recebe
+ * os bits 8-9 no topo, com padding de 6 zeros abaixo.
+ *
+ * @param[in] ch Caractere ASCII (32-127).
+ */
+static void
+display_draw_char(char ch)
+{
+    uint8_t idx;
+    uint8_t col;
+    uint8_t page_top;
+    uint8_t page_bot;
+    uint16_t offset_top;
+    uint16_t offset_bot;
+
+    if ((' ' > ch) || ('~' < ch))
+    {
+        ch = ' ';
+    }
+
+    /* Cast: ch e ' ' sao ASCII (0-127), diferenca segura em uint8_t. */
+    idx = (uint8_t)(ch - ' ');
+
+    page_top = g_cursor_y / 8u;
+    page_bot = page_top + 1u;
+
+    for (col = 0u; col < DISPLAY_CHAR_WIDTH; col++)
+    {
+        if ((g_cursor_x + col) >= SSD1306_WIDTH)
+        {
+            break;
+        }
+
+        offset_top = ((uint16_t)page_top * SSD1306_WIDTH)
+                     + g_cursor_x + col;
+        g_frame_buf[offset_top] = g_font7x10[idx][col];
+
+        if (page_bot < SSD1306_PAGES)
+        {
+            offset_bot = ((uint16_t)page_bot * SSD1306_WIDTH)
+                         + g_cursor_x + col;
+
+            if (0u != (g_font7x10[idx][col] & 0x04u))
+            {
+                g_frame_buf[offset_bot] = 0x01u;
+            }
+            else
+            {
+                g_frame_buf[offset_bot] = 0x00u;
+            }
+        }
+    }
+
+    g_cursor_x += DISPLAY_CHAR_STEP;
+}
+
+/*!
+ * @brief Desenha uma string no frame buffer a partir do cursor.
+ *
+ * @param[in] p_str String terminada em '\0'.
+ */
+static void
+display_draw_string(const char *p_str)
+{
+    uint16_t idx;
+
+    if (NULL == p_str)
+    {
+        return;
+    }
+
+    for (idx = 0u; '\0' != p_str[idx]; idx++)
+    {
+        if (SSD1306_WIDTH <= g_cursor_x)
+        {
+            break;
+        }
+
+        display_draw_char(p_str[idx]);
+    }
+}
+
+/*!
+ * @brief Desenha um unico caractere 2x (10x16) no frame buffer.
+ *
+ * Cada coluna da fonte 5x7 e expandida para 2 colunas (escala
+ * horizontal) e cada bit e expandido para 2 pixels verticais
+ * (escala vertical), resultando em 10x16 pixels por caractere.
+ * O caractere ocupa 2 paginas consecutivas do SSD1306.
+ *
+ * @param[in] ch Caractere ASCII (32-127).
+ */
+static void
+display_draw_char_big(char ch)
+{
+    uint8_t idx;
+    uint8_t col;
+    uint8_t bit;
+    uint8_t glyph_col;
+    uint8_t page_top;
+    uint8_t page_bot;
+    uint16_t offset_top;
+    uint16_t offset_bot;
+    uint8_t top_byte;
+    uint8_t bot_byte;
+
+    if ((' ' > ch) || ('~' < ch))
+    {
+        ch = ' ';
+    }
+
+    /* Cast: ch e ' ' sao ASCII (0-127), diferenca segura em uint8_t. */
+    idx = (uint8_t)(ch - ' ');
+
+    page_top = g_cursor_y / 8u;
+    page_bot = page_top + 1u;
+
+    for (col = 0u; col < DISPLAY_BIG_CHAR_W; col++)
+    {
+        if ((g_cursor_x + col) >= SSD1306_WIDTH)
+        {
+            break;
+        }
+
+        /* Cast: col/2 seguro pois col < 10, resultado 0-4 em uint8_t. */
+        glyph_col = (uint8_t)(col / 2u);
+
+        top_byte = 0u;
+        bot_byte = 0u;
+
+        for (bit = 0u; bit < 4u; bit++)
+        {
+            if (0u != (g_font5x7[idx][glyph_col] & (1u << bit)))
+            {
+                top_byte |= (3u << (bit * 2u));
+            }
+        }
+
+        for (bit = 0u; bit < 4u; bit++)
+        {
+            if (0u != (g_font5x7[idx][glyph_col] & (1u << (bit + 4u))))
+            {
+                bot_byte |= (3u << (bit * 2u));
+            }
+        }
+
+        offset_top = ((uint16_t)page_top * SSD1306_WIDTH)
+                     + g_cursor_x + col;
+        g_frame_buf[offset_top] = top_byte;
+
+        if (page_bot < SSD1306_PAGES)
+        {
+            offset_bot = ((uint16_t)page_bot * SSD1306_WIDTH)
+                         + g_cursor_x + col;
+            g_frame_buf[offset_bot] = bot_byte;
+        }
+    }
+
+    g_cursor_x += DISPLAY_BIG_STEP;
+}
+
+/*!
+ * @brief Desenha uma string em fonte 2x (10x16) a partir do cursor.
+ *
+ * @param[in] p_str String terminada em '\0'.
+ */
+static void
+display_draw_string_big(const char *p_str)
+{
+    uint16_t idx;
+
+    if (NULL == p_str)
+    {
+        return;
+    }
+
+    for (idx = 0u; '\0' != p_str[idx]; idx++)
+    {
+        if (SSD1306_WIDTH <= g_cursor_x)
+        {
+            break;
+        }
+
+        display_draw_char_big(p_str[idx]);
+    }
+}
+
+/*!
+ * @brief Posiciona o cursor virtual no frame buffer.
+ *
+ * @param[in] x_pos Coluna (0 a 127).
+ * @param[in] y_pos Linha em pixels (0 a 63, multiplo de 8).
+ */
+static void
+display_set_cursor(uint8_t x_pos, uint8_t y_pos)
+{
+    g_cursor_x = x_pos;
+    g_cursor_y = y_pos;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Funcoes Publicas                                                   */
+/* ------------------------------------------------------------------ */
+
+void
+display_init(void)
+{
+    i2c_init(DISPLAY_I2C_PORT, DISPLAY_I2C_CLK_HZ);
+
+    gpio_set_function(DISPLAY_I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(DISPLAY_I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(DISPLAY_I2C_SDA);
+    gpio_pull_up(DISPLAY_I2C_SCL);
+
+    sleep_ms(100u);
+
+    display_write_cmd(SSD1306_CMD_DISPLAY_OFF);
+
+    display_write_cmd(SSD1306_CMD_SET_DISP_CLK_DIV);
+    display_write_cmd(0x80u);
+
+    display_write_cmd(SSD1306_CMD_SET_MUX_RATIO);
+    display_write_cmd(0x3Fu);
+
+    display_write_cmd(SSD1306_CMD_SET_DISP_OFFSET);
+    display_write_cmd(0x00u);
+
+    display_write_cmd(SSD1306_CMD_SET_DISP_START_LINE | 0u);
+
+    display_write_cmd(SSD1306_CMD_SET_CHARGE_PUMP);
+    display_write_cmd(0x14u);
+
+    display_write_cmd(SSD1306_CMD_SET_MEM_ADDR_MODE);
+    display_write_cmd(0x00u);
+
+    display_write_cmd(SSD1306_CMD_SET_SEG_REMAP);
+    display_write_cmd(SSD1306_CMD_SET_COM_SCAN_DIR);
+
+    display_write_cmd(SSD1306_CMD_SET_COM_PINS);
+    display_write_cmd(0x12u);
+
+    display_write_cmd(SSD1306_CMD_SET_CONTRAST);
+    display_write_cmd(0xFFu);
+
+    display_write_cmd(SSD1306_CMD_SET_PRECHARGE);
+    display_write_cmd(0xF1u);
+
+    display_write_cmd(SSD1306_CMD_SET_VCOM_DESELECT);
+    display_write_cmd(0x40u);
+
+    display_write_cmd(SSD1306_CMD_SET_ENTIRE_ON_RESUME);
+    display_write_cmd(SSD1306_CMD_SET_NORMAL_DISP);
+
+    display_write_cmd(SSD1306_CMD_DISPLAY_ON);
+
+    display_clear();
+}
+
+void
+display_clear(void)
+{
+    memset(g_frame_buf, 0, sizeof(g_frame_buf));
+    g_cursor_x = 0u;
+    g_cursor_y = 0u;
+    display_render();
+}
+
+void
+display_show_cpu(float usage, float temp, uint32_t clock)
+{
+    char line[11u];
+    uint8_t title_len;
+    uint8_t title_x;
+
+    display_clear();
+
+    title_len = 3u;
+    title_x = (SSD1306_WIDTH - (title_len * DISPLAY_BIG_STEP)) / 2u;
+
+    display_set_cursor(title_x, 0u);
+    display_draw_string_big("CPU");
+
+    display_set_cursor(0u, DISPLAY_DATA_START_Y);
+    snprintf(line, sizeof(line), "%.1f%%", usage);
+    display_draw_string_big(line);
+
+    display_set_cursor(0u, DISPLAY_DATA_START_Y + DISPLAY_BIG_BYTE_H);
+    snprintf(line, sizeof(line), "%.1fC", temp);
+    display_draw_string_big(line);
+
+    display_set_cursor(0u, DISPLAY_DATA_START_Y + (DISPLAY_BIG_BYTE_H * 2u));
+    /* Cast: uint32_t -> unsigned int seguro em ARM Cortex-M0+ (32-bit). */
+    snprintf(line, sizeof(line), "%uMHz", (unsigned int)clock);
+    display_draw_string_big(line);
+
+    display_render();
+}
+
+void
+display_show_gpu(float usage, float temp,
+                 float vram_used, float vram_total)
+{
+    char line[11u];
+    uint8_t title_len;
+    uint8_t title_x;
+
+    display_clear();
+
+    title_len = 3u;
+    title_x = (SSD1306_WIDTH - (title_len * DISPLAY_BIG_STEP)) / 2u;
+
+    display_set_cursor(title_x, 0u);
+    display_draw_string_big("GPU");
+
+    display_set_cursor(0u, DISPLAY_DATA_START_Y);
+    snprintf(line, sizeof(line), "%.1f%%", usage);
+    display_draw_string_big(line);
+
+    display_set_cursor(0u, DISPLAY_DATA_START_Y + DISPLAY_BIG_BYTE_H);
+    snprintf(line, sizeof(line), "%.1fC", temp);
+    display_draw_string_big(line);
+
+    display_set_cursor(0u, DISPLAY_DATA_START_Y + (DISPLAY_BIG_BYTE_H * 2u));
+    snprintf(line, sizeof(line), "%.1f/%.1fG", vram_used, vram_total);
+    display_draw_string_big(line);
+
+    display_render();
+}
+
+/*** end of file ***/
